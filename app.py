@@ -68,15 +68,20 @@ from google.oauth2.service_account import Credentials
 app = Flask(__name__)
 
 # --- Google Sheets connection ---
+import base64
+
 def get_gsheet():
     creds = None
 
     # 1️⃣ Try loading credentials from environment variable (Render)
-    creds_json = os.getenv("GOOGLE_SHEETS_CREDENTIALS")
+    creds_b64 = os.getenv("GOOGLE_SHEETS_CREDENTIALS")
 
-    if creds_json:
+    if creds_b64:
         try:
+            # Decode from base64 → JSON
+            creds_json = base64.b64decode(creds_b64).decode('utf-8')
             creds_dict = json.loads(creds_json)
+
             creds = Credentials.from_service_account_info(
                 creds_dict,
                 scopes=["https://www.googleapis.com/auth/spreadsheets"]
@@ -85,21 +90,18 @@ def get_gsheet():
         except Exception as e:
             print("⚠️ Failed to load credentials from environment variable:", e)
 
-    # 2️⃣ If no env var found, fall back to local JSON file (for local testing)
+    # 2️⃣ If no env var found, use local file for local testing
     if not creds:
         try:
             creds = Credentials.from_service_account_file(
-                "travel-bot-botshyka-81a67d5ce0c5.json",
+                "travel-bot-botshyka-337485d8f425.json",
                 scopes=["https://www.googleapis.com/auth/spreadsheets"]
             )
             print("✅ Loaded credentials from local JSON file.")
         except FileNotFoundError:
-            raise Exception("❌ No credentials found. Please set GOOGLE_SHEETS_CREDENTIALS env var or keep local JSON file.")
+            raise Exception("❌ No credentials found. Set GOOGLE_SHEETS_CREDENTIALS env var or keep local JSON file.")
 
-    # 3️⃣ Authorize Google Sheets client
     client = gspread.authorize(creds)
-
-    # Replace with your actual Sheet name
     sheet = client.open("travel-bot-data").sheet1
     return sheet
 
