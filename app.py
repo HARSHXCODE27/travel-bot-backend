@@ -49,7 +49,7 @@ def webhook():
     name = params.get('name')
     city = params.get('city')
     country = params.get('country')
-    destination = params.get('destination')
+    destination = f"{city}, {country}" if city and country else city or country
     travel_date = params.get('date')
     pax = params.get('pax')
     email = params.get('email')
