@@ -47,6 +47,8 @@ def webhook():
 
     # Get parameters sent by Dialogflow
     name = params.get('name')
+    city = params.get('city')
+    country = params.get('country')
     destination = params.get('destination')
     travel_date = params.get('date')
     pax = params.get('pax')
