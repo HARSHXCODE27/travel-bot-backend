@@ -30,6 +30,16 @@ def get_gsheet():
         raise
 
 
+# --- Helper function to clean values ---
+def clean(value):
+    if isinstance(value, list):
+        return ", ".join(str(v) for v in value)
+    elif value is None:
+        return ""
+    else:
+        return str(value)
+
+
 # --- Test route to verify environment variable ---
 @app.route("/test-env")
 def test_env():
@@ -55,18 +65,7 @@ def webhook():
     email = params.get('email')
     phone = params.get('phone')
 
-    # Connect to Google Sheet
-    sheet = get_gsheet()
-
     # Clean up parameters to avoid list issues
-def clean(value):
-    if isinstance(value, list):
-        return ", ".join(str(v) for v in value)
-    elif value is None:
-        return ""
-    else:
-        return str(value)
-
     name = clean(name)
     destination = clean(destination)
     travel_date = clean(travel_date)
@@ -74,6 +73,8 @@ def clean(value):
     email = clean(email)
     phone = clean(phone)
 
+    # Connect to Google Sheet
+    sheet = get_gsheet()
 
     # Append a new row
     sheet.append_row([name, destination, travel_date, pax, email, phone])
