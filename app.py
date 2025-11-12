@@ -58,6 +58,23 @@ def webhook():
     # Connect to Google Sheet
     sheet = get_gsheet()
 
+    # Clean up parameters to avoid list issues
+def clean(value):
+    if isinstance(value, list):
+        return ", ".join(str(v) for v in value)
+    elif value is None:
+        return ""
+    else:
+        return str(value)
+
+    name = clean(name)
+    destination = clean(destination)
+    travel_date = clean(travel_date)
+    pax = clean(pax)
+    email = clean(email)
+    phone = clean(phone)
+
+
     # Append a new row
     sheet.append_row([name, destination, travel_date, pax, email, phone])
 
