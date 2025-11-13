@@ -7,11 +7,12 @@ from datetime import datetime
 
 app = Flask(__name__)
 
-# Temporary memory for active sessions
+# Temporary in-memory store for each user session
 user_sessions = {}
 
 # --- Google Sheets connection ---
 def get_gsheet():
+    """Authorize and return the Google Sheet instance."""
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive"
@@ -28,24 +29,29 @@ def get_gsheet():
     return sheet
 
 
-# --- Helper function to clean values ---
+# --- Helper to clean parameter values ---
 def clean(value):
     if isinstance(value, list):
         return ", ".join(str(v) for v in value)
     elif value is None:
         return ""
     else:
-        return str(value)
+        return str(value).strip()
 
 
-# --- Smart travel date extractor ---
+# --- Smart date extractor ---
 def get_travel_dates(params, query_text):
+    """Handle @sys.date-period, @sys.date, or fuzzy month text."""
     date_period = params.get('date-period')
-    if date_period:
+    single_date = params.get('date')
+    if date_period and isinstance(date_period, dict):
         start_date = date_period.get('startDate')
         end_date = date_period.get('endDate')
         return f"{start_date} → {end_date}"
+    elif single_date:
+        return single_date
 
+    # Fallback for approximate or fuzzy text like "around July"
     query_text = query_text.lower()
     current_year = datetime.now().year
     months = {
@@ -63,11 +69,11 @@ def get_travel_dates(params, query_text):
     if selected_month:
         year = current_year + 1 if "next year" in query_text else current_year
         return f"{year}-{selected_month}-01 → {year}-{selected_month}-31"
-    
+
     return "Unclear date"
 
 
-# --- Webhook ---
+# --- Webhook route ---
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json()
@@ -76,10 +82,9 @@ def webhook():
     query_text = data['queryResult'].get('queryText', '')
     session = data['session']
 
-    # Get user session
+    # Create or get session memory
     if session not in user_sessions:
         user_sessions[session] = {}
-
     user_data = user_sessions[session]
 
     # --- DESTINATION INTENT ---
@@ -89,7 +94,7 @@ def webhook():
         destination = f"{city}, {country}" if city and country else city or country
         user_data["destination"] = clean(destination)
         return jsonify({
-            'fulfillmentText': f"Got it! You're planning a trip to {destination}. When would you like to travel?"
+            "fulfillmentText": f"Got it! You're planning a trip to {destination}. When would you like to travel?"
         })
 
     # --- DATE INTENT ---
@@ -97,26 +102,44 @@ def webhook():
         travel_date = get_travel_dates(params, query_text)
         user_data["travel_date"] = clean(travel_date)
         return jsonify({
-            'fulfillmentText': f"Perfect! When you travel on {travel_date}. How many people will be going?"
+            "fulfillmentText": f"Perfect! Planning travel around {travel_date}. How many people will be going?"
         })
 
     # --- PAX INTENT ---
     elif "pax" in intent_name.lower():
-        pax = params.get('pax')
-        if isinstance(pax, list):
-            pax = pax[0] if pax else ""
-        elif isinstance(pax, dict):
-            pax = pax.get('amount', '')
+        pax_param = params.get('pax')
+        if isinstance(pax_param, list):
+            pax = pax_param[0] if pax_param else ""
+        elif isinstance(pax_param, dict):
+            pax = pax_param.get('amount', '')
+        else:
+            pax = pax_param or ""
         user_data["pax"] = clean(pax)
         return jsonify({
-            'fulfillmentText': f"Great! Noted {pax} travelers. Can I have your name, email, and phone number?"
+            "fulfillmentText": f"Got it — {pax} travelers. Can I have your name, email, and phone number?"
         })
 
-    # --- CONTACT DETAILS INTENT ---
+    # --- CONTACT INTENT ---
     elif "contact" in intent_name.lower():
-        user_data["name"] = clean(params.get('name'))
-        user_data["email"] = clean(params.get('email'))
-        user_data["phone"] = clean(params.get('phone'))
+        # Try to extract one or more details even if partial
+        name = clean(params.get('name'))
+        email = clean(params.get('email'))
+        phone = clean(params.get('phone'))
+
+        if name:
+            user_data["name"] = name
+        if email:
+            user_data["email"] = email
+        if phone:
+            user_data["phone"] = phone
+
+        # If all details are not yet captured
+        missing_fields = [k for k in ["name", "email", "phone"] if not user_data.get(k)]
+        if missing_fields:
+            ask = " ,".join(missing_fields)
+            return jsonify({
+                "fulfillmentText": f"I still need your {ask}. Could you please share that?"
+            })
 
         # Save to Google Sheet
         sheet = get_gsheet()
@@ -129,20 +152,23 @@ def webhook():
             user_data.get("phone", "")
         ])
 
-        # clear session memory
+        # Clear memory for this user
         user_sessions.pop(session, None)
 
         return jsonify({
-            'fulfillmentText': f"Thanks {user_data.get('name')}! Your trip to {user_data.get('destination')} on {user_data.get('travel_date')} for {user_data.get('pax')} people has been recorded. We'll contact you soon."
+            "fulfillmentText": f"Thanks {user_data.get('name')}! Your trip to {user_data.get('destination')} on {user_data.get('travel_date')} for {user_data.get('pax')} people has been recorded. We'll contact you soon."
         })
 
     # --- DEFAULT ---
-    return jsonify({'fulfillmentText': "I'm not sure what details to save. Could you please repeat?"})
+    return jsonify({
+        "fulfillmentText": "I didn’t quite get that. Could you rephrase?"
+    })
 
 
+# --- Health check ---
 @app.route('/')
 def home():
-    return "✅ Travel Bot Backend connected with Google Sheets and memory tracking!"
+    return "✅ Travel Bot Backend connected to Google Sheets and session tracking active!"
 
 
 if __name__ == '__main__':
