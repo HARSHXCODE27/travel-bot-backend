@@ -1,19 +1,17 @@
 from flask import Flask, request, jsonify
-import gspread
 import os
 import json
-from google.oauth2.service_account import Credentials
+import re
 from datetime import datetime
+import gspread
+from google.oauth2.service_account import Credentials
 
 app = Flask(__name__)
 
 # Temporary memory for active sessions
 user_sessions = {}
 
-
-# -------------------------------------------
-# GOOGLE SHEETS CONNECTION
-# -------------------------------------------
+# --- Google Sheets connection ---
 def get_gsheet():
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -22,7 +20,7 @@ def get_gsheet():
 
     creds_json = os.getenv("GOOGLE_SHEETS_CREDENTIALS")
     if not creds_json:
-        raise Exception("❌ GOOGLE_SHEETS_CREDENTIALS environment variable not set.")
+        raise Exception("❌ GOOGLE_SHEETS_CREDENTIALS env variable missing!")
 
     creds_dict = json.loads(creds_json)
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
@@ -31,135 +29,145 @@ def get_gsheet():
     return sheet
 
 
-# -------------------------------------------
-# CLEAN VALUES
-# -------------------------------------------
+# --- Helper function to clean values ---
 def clean(value):
     if isinstance(value, list):
         return ", ".join(str(v) for v in value)
-    return "" if value is None else str(value)
+    elif value is None:
+        return ""
+    else:
+        return str(value)
 
 
-# -------------------------------------------
-# FIXED DATE EXTRACTOR (Main Fix)
-# -------------------------------------------
-def get_travel_dates(params, query_text):
+# --- Month-Year Normalizer (ONLY THIS MATTERS NOW) ---
+MONTHS = {
+    "jan": "01", "january": "01",
+    "feb": "02", "february": "02",
+    "mar": "03", "march": "03",
+    "apr": "04", "april": "04",
+    "may": "05",
+    "jun": "06", "june": "06",
+    "jul": "07", "july": "07",
+    "aug": "08", "august": "08",
+    "sep": "09", "september": "09",
+    "oct": "10", "october": "10",
+    "nov": "11", "november": "11",
+    "dec": "12", "december": "12"
+}
 
-    # CASE 1: Dialogflow returns a DATE PERIOD list
-    date_period = params.get("date-period")
-    if isinstance(date_period, list) and len(date_period) > 0:
-        dp = date_period[0]
-        start = dp.get("startDate")
-        end = dp.get("endDate")
-        if start and end:
-            return f"{start} → {end}"
-
-    # CASE 2: User enters only day + month (Dialogflow returns date)
-    date_alt = params.get("date_alt")
-    if date_alt:
-        try:
-            dt = datetime.fromisoformat(date_alt.replace("Z", ""))
-            # Convert to full month range
-            first = f"{dt.year}-{dt.month:02d}-01"
-            last = f"{dt.year}-{dt.month:02d}-31"
-            return f"{first} → {last}"
-        except:
-            pass
-
-    # CASE 3: Keyword month detection (fallback)
-    query_text = query_text.lower()
+def normalize_month_year(text):
+    text = text.lower().strip()
     current_year = datetime.now().year
-    months = {
-        "january": "01", "february": "02", "march": "03", "april": "04",
-        "may": "05", "june": "06", "july": "07", "august": "08",
-        "september": "09", "october": "10", "november": "11", "december": "12"
-    }
 
-    for m_name, m_num in months.items():
-        if m_name in query_text:
-            return f"{current_year}-{m_num}-01 → {current_year}-{m_num}-31"
+    # 1) Month name + year
+    for name, num in MONTHS.items():
+        if name in text:
+            year_match = re.search(r"(20\d{2}|\d{2})", text)
+            if year_match:
+                yy = year_match.group(0)
+                if len(yy) == 2:
+                    yy = "20" + yy
+            else:
+                yy = str(current_year)  # If year missing
+            return f"{num}-{yy}"
 
-    return "Unclear date"
+    # 2) Numeric month-year (1/2026, 01-2026, 1.26 etc)
+    match = re.match(r"^(\d{1,2})[-\/\. ](\d{2,4})$", text)
+    if match:
+        mm, yy = match.groups()
+        if len(yy) == 2:
+            yy = "20" + yy
+        return f"{int(mm):02d}-{yy}"
+
+    return "INVALID"
 
 
-# -------------------------------------------
-# WEBHOOK
-# -------------------------------------------
-@app.route("/webhook", methods=["POST"])
+# Webhook handler
+@app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json()
-    intent = data["queryResult"]["intent"]["displayName"].lower()
-    params = data["queryResult"]["parameters"]
-    query_text = data["queryResult"].get("queryText", "")
-    session = data["session"]
+    intent_name = data['queryResult']['intent']['displayName']
+    params = data['queryResult']['parameters']
+    query_text = data['queryResult'].get('queryText', '')
+    session = data['session']
 
+    # Initialize user session
     if session not in user_sessions:
         user_sessions[session] = {}
-    user = user_sessions[session]
 
-    # -------------------------------------------
+    user_data = user_sessions[session]
+
+    # ==========================================================
     # DESTINATION INTENT
-    # -------------------------------------------
-    if "destination" in intent:
-        city = params.get("city")
-        country = params.get("country")
-        destination = city or country or "your destination"
-        user["destination"] = clean(destination)
+    # ==========================================================
+    if "destination" in intent_name.lower():
+        city = params.get('city')
+        country = params.get('country')
+        destination = city or country or ""
+        if city and country:
+            destination = f"{city}, {country}"
+
+        user_data["destination"] = clean(destination)
 
         return jsonify({
-            "fulfillmentText": f"Got it! You're planning a trip to {destination}. When would you like to travel?"
+            "fulfillmentText": f"Got it! You're planning a trip to {destination}. "
+                               "Which month and year would you like to travel? (e.g., Jan 2026)"
         })
 
-    # -------------------------------------------
-    # DATE INTENT
-    # -------------------------------------------
-    elif "date" in intent:
-        travel_date = get_travel_dates(params, query_text)
-        user["travel_date"] = clean(travel_date)
+    # ==========================================================
+    # DATE INTENT (Month + Year ONLY)
+    # ==========================================================
+    elif "date" in intent_name.lower():
+        travel_date = normalize_month_year(query_text)
+
+        if travel_date == "INVALID":
+            return jsonify({
+                "fulfillmentText": "Please enter your travel month in a valid format like: "
+                                   "Jan 2026, January 2026, 01-2026, or 1/2026."
+            })
+
+        user_data["travel_date"] = travel_date
 
         return jsonify({
-            "fulfillmentText": f"Perfect! When you travel on {travel_date}. How many people will be going?"
+            "fulfillmentText": f"Perfect! Your travel month is {travel_date}. "
+                               "How many people will be going?"
         })
 
-    # -------------------------------------------
+    # ==========================================================
     # PAX INTENT
-    # -------------------------------------------
-    elif "pax" in intent:
-        number = params.get("number")
-        pax_type = params.get("pax_type")  # adult / child / infant etc.
-
-        if number:
-            pax = f"{number} {pax_type}" if pax_type else number
-        else:
-            pax = clean(params.get("pax_entity"))
-
-        user["pax"] = clean(pax)
+    # ==========================================================
+    elif "pax" in intent_name.lower():
+        pax = params.get('number')
+        if isinstance(pax, list) and pax:
+            pax = pax[0]
+        user_data["pax"] = clean(pax)
 
         return jsonify({
-            "fulfillmentText": f"Great! Noted {pax} travelers. Can I have your name, email, and phone number?"
+            "fulfillmentText": f"Great! Noted {pax} travelers. "
+                               "Can I have your name, email, and phone number?"
         })
 
-    # -------------------------------------------
-    # CONTACT DETAILS INTENT
-    # -------------------------------------------
-    elif "contact" in intent:
-        name = params.get("name")
-        email = params.get("email")
-        phone = params.get("phone")
+    # ==========================================================
+    # CONTACT INTENT
+    # ==========================================================
+    elif "contact" in intent_name.lower():
+        name = params.get('name')
+        email = params.get('email')
+        phone = params.get('phone-number') or params.get('phone')
 
-        user["name"] = clean(name)
-        user["email"] = clean(email)
-        user["phone"] = clean(phone)
+        user_data["name"] = clean(name)
+        user_data["email"] = clean(email)
+        user_data["phone"] = clean(phone)
 
-        # Save in Google Sheet
+        # Write data to Google Sheet
         sheet = get_gsheet()
         sheet.append_row([
-            user.get("name", ""),
-            user.get("destination", ""),
-            user.get("travel_date", ""),
-            user.get("pax", ""),
-            user.get("email", ""),
-            user.get("phone", "")
+            user_data.get("name", ""),
+            user_data.get("destination", ""),
+            user_data.get("travel_date", ""),
+            user_data.get("pax", ""),
+            user_data.get("email", ""),
+            user_data.get("phone", "")
         ])
 
         # Clear session
@@ -167,18 +175,24 @@ def webhook():
 
         return jsonify({
             "fulfillmentText":
-                f"Thanks {name}! Your trip to {user.get('destination')} "
-                f"on {user.get('travel_date')} for {user.get('pax')} people "
-                f"has been recorded. We'll contact you soon."
+                f"Thanks {user_data.get('name')}! Your trip to "
+                f"{user_data.get('destination')} in {user_data.get('travel_date')} "
+                f"for {user_data.get('pax')} people has been recorded. "
+                "We'll contact you soon."
         })
 
-    return jsonify({"fulfillmentText": "Could you repeat that please?"})
+    # ==========================================================
+    # DEFAULT FALLBACK
+    # ==========================================================
+    return jsonify({
+        "fulfillmentText": "I'm not sure what details to save. Can you please repeat?"
+    })
 
 
-@app.route("/")
+@app.route('/')
 def home():
-    return "✅ Travel Bot Backend connected!"
+    return "✅ Travel Bot Backend connected with Google Sheets & session memory!"
 
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=10000)
